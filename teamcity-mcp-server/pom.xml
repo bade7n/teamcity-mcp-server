@@ -1,0 +1,56 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.example.teamcity</groupId>
+    <artifactId>teamcity-mcp-plugin</artifactId>
+    <version>${revision}</version>
+    <relativePath>../</relativePath>
+  </parent>
+
+  <artifactId>teamcity-mcp-server</artifactId>
+  <packaging>jar</packaging>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.teamcity</groupId>
+      <artifactId>server-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jetbrains.teamcity</groupId>
+      <artifactId>web-openapi</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp</artifactId>
+      <version>${mcp.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jetbrains.teamcity</groupId>
+        <artifactId>teamcity-maven-plugin</artifactId>
+        <version>1.6.35</version>
+        <executions>
+          <execution>
+            <id>teamcity-assemble-plugin</id>
+            <goals>
+              <goal>build</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <server>
+          </server>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>
