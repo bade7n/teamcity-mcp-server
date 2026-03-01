@@ -9,6 +9,7 @@ import io.modelcontextprotocol.spec.McpServerSession;
 import io.modelcontextprotocol.spec.McpServerTransport;
 import io.modelcontextprotocol.spec.McpServerTransportProvider;
 import io.modelcontextprotocol.util.KeepAliveScheduler;
+import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapperSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
@@ -290,12 +291,16 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
   }
 
   public static final class Builder {
-    private McpJsonMapper jsonMapper = McpJsonMapper.getDefault();
+    private McpJsonMapper jsonMapper;
     private String baseUrl = DEFAULT_BASE_URL;
     private String messageEndpoint = "/mcp/message";
     private String sseEndpoint = DEFAULT_SSE_ENDPOINT;
     private Duration keepAliveInterval;
     private McpTransportContextExtractor<HttpServletRequest> contextExtractor = request -> McpTransportContext.EMPTY;
+
+    public Builder() {
+      this.jsonMapper = resolveDefaultMapper();
+    }
 
     public Builder jsonMapper(McpJsonMapper jsonMapper) {
       this.jsonMapper = jsonMapper;
@@ -329,6 +334,14 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
 
     public McpSseServerTransportProvider build() {
       return new McpSseServerTransportProvider(jsonMapper, baseUrl, messageEndpoint, sseEndpoint, keepAliveInterval, contextExtractor);
+    }
+
+    private static McpJsonMapper resolveDefaultMapper() {
+      try {
+        return McpJsonMapper.getDefault();
+      } catch (IllegalStateException ex) {
+        return new JacksonMcpJsonMapperSupplier().get();
+      }
     }
   }
 }

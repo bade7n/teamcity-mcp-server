@@ -1,6 +1,10 @@
 package com.example.teamcity.mcp;
 
+import io.modelcontextprotocol.json.McpJsonMapper;
+import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapperSupplier;
 import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.json.schema.JsonSchemaValidator;
+import io.modelcontextprotocol.json.schema.jackson.JacksonJsonSchemaValidatorSupplier;
 import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.spec.McpSchema;
 import jetbrains.buildServer.serverSide.SBuild;
@@ -16,8 +20,8 @@ import java.util.List;
 import java.util.Map;
 
 public class McpTeamCityServer implements DisposableBean {
-  private static final String MESSAGE_ENDPOINT = "/mcp/message";
-  private static final String SSE_ENDPOINT = "/mcp/sse";
+  private static final String MESSAGE_ENDPOINT = "/mcp/message/**";
+  private static final String SSE_ENDPOINT = "/mcp/sse/**";
 
   private final McpSseServerTransportProvider transport;
   private final McpSyncServer server;
@@ -33,9 +37,13 @@ public class McpTeamCityServer implements DisposableBean {
       .sseEndpoint(SSE_ENDPOINT)
       .build();
 
+    McpJsonMapper jsonMapper = resolveDefaultMapper();
+    JsonSchemaValidator schemaValidator = resolveDefaultSchemaValidator();
     this.server = McpServer.sync(transport)
       .serverInfo("teamcity-mcp", "1.0.0")
       .capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
+      .jsonMapper(jsonMapper)
+      .jsonSchemaValidator(schemaValidator)
       .toolCall(startBuildTool(), (exchange, request) -> startBuild(buildServer, request))
       .toolCall(buildStatusTool(), (exchange, request) -> buildStatus(buildServer, request))
       .toolCall(buildLogTool(), (exchange, request) -> buildLog(buildServer, request))
@@ -163,6 +171,22 @@ public class McpTeamCityServer implements DisposableBean {
       "buildId", idParam,
       "logUrl", logUrl
     ), "log_url");
+  }
+
+  private static McpJsonMapper resolveDefaultMapper() {
+    try {
+      return McpJsonMapper.getDefault();
+    } catch (IllegalStateException ex) {
+      return new JacksonMcpJsonMapperSupplier().get();
+    }
+  }
+
+  private static JsonSchemaValidator resolveDefaultSchemaValidator() {
+    try {
+      return JsonSchemaValidator.getDefault();
+    } catch (IllegalStateException ex) {
+      return new JacksonJsonSchemaValidatorSupplier().get();
+    }
   }
 
   private static McpSchema.CallToolResult successResult(Map<String, Object> structuredContent, String message) {
