@@ -65,11 +65,18 @@
             <goals>
               <goal>build</goal>
             </goals>
+            <configuration>
+              <server>
+                <pluginName>mcp-support</pluginName>
+                <descriptor>
+                  <useSeparateClassloader>true</useSeparateClassloader>
+                  <allowRuntimeReload>true</allowRuntimeReload>
+                  <nodeResponsibilitiesAware>true</nodeResponsibilitiesAware>
+                </descriptor>
+              </server>
+            </configuration>
           </execution>
         </executions>
-        <configuration>
-          <server/>
-        </configuration>
       </plugin>
     </plugins>
   </build>

@@ -16,6 +16,7 @@ public class McpMessageController extends McpController {
   public McpMessageController(@NotNull McpTokenAuth auth,
                               @NotNull McpSseServerTransportProvider transport) {
     super(auth, Mode.MESSAGE, transport);
+    System.out.println("McpMessageController being registered/started");
   }
 
 }

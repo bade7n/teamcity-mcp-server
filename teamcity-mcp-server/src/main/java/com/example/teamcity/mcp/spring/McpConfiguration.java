@@ -1,7 +1,10 @@
 package com.example.teamcity.mcp.spring;
 
+import com.example.teamcity.mcp.McpSseServerTransportProvider;
 import com.example.teamcity.mcp.McpTeamCityServer;
 import com.example.teamcity.mcp.McpTokenAuth;
+import com.example.teamcity.mcp.controller.McpMessageController;
+import com.example.teamcity.mcp.controller.McpSSETransportController;
 import jetbrains.buildServer.serverSide.SBuildServer;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
@@ -20,8 +23,18 @@ public class McpConfiguration {
   }
 
   @Bean
-  public McpTeamCityServer teamCityServer(@NotNull SBuildServer buildServer) {
+  public McpTeamCityServer teamCityServer(@NotNull SBuildServer buildServer, @NotNull McpSseServerTransportProvider transportProvider) {
     logger.warn("MCP: Initializing TeamCity server with token auth");
-    return new McpTeamCityServer(buildServer);
+    return new McpTeamCityServer(buildServer, transportProvider);
+  }
+
+  @Bean
+  public McpSseServerTransportProvider sseServerTransportProvider(@NotNull SBuildServer buildServer) {
+    String baseUrl = buildServer.getRootUrl();
+    return McpSseServerTransportProvider.builder()
+                                 .baseUrl(baseUrl == null ? "" : baseUrl)
+                                 .messageEndpoint(McpMessageController.ENDPOINT)
+                                 .sseEndpoint(McpSSETransportController.ENDPOINT)
+                                 .build();
   }
 }

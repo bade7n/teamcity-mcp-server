@@ -16,6 +16,7 @@ public class McpSSETransportController extends McpController {
   public McpSSETransportController(@NotNull McpTokenAuth auth,
                                 @NotNull McpSseServerTransportProvider transport) {
     super(auth, Mode.SSE, transport);
+    System.out.println("McpSSEMessageController being registered/started");
   }
 
 }

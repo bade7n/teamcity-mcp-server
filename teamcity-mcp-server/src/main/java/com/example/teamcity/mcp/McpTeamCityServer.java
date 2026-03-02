@@ -26,14 +26,8 @@ public class McpTeamCityServer implements DisposableBean {
   private final McpSseServerTransportProvider transport;
   private final McpSyncServer server;
 
-  public McpTeamCityServer(@NotNull SBuildServer buildServer) {
-    String baseUrl = buildServer.getRootUrl();
-
-    this.transport = McpSseServerTransportProvider.builder()
-      .baseUrl(baseUrl == null ? "" : baseUrl)
-      .messageEndpoint(McpMessageController.ENDPOINT)
-      .sseEndpoint(McpSSETransportController.ENDPOINT)
-      .build();
+  public McpTeamCityServer(@NotNull SBuildServer buildServer, McpSseServerTransportProvider transport) {
+    this.transport = transport;
 
     McpJsonMapper jsonMapper = resolveDefaultMapper();
     JsonSchemaValidator schemaValidator = resolveDefaultSchemaValidator();
