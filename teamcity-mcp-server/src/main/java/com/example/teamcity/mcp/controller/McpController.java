@@ -1,32 +1,27 @@
-package com.example.teamcity.mcp;
+package com.example.teamcity.mcp.controller;
 
+import com.example.teamcity.mcp.McpSseServerTransportProvider;
+import com.example.teamcity.mcp.McpTokenAuth;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import jetbrains.buildServer.controllers.BaseController;
-import jetbrains.buildServer.web.openapi.WebControllerManager;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.web.servlet.ModelAndView;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-
-public class McpTransportController extends BaseController {
+public class McpController extends BaseController {
   public enum Mode {
     SSE,
     MESSAGE
   }
 
-  private final McpSseServerTransportProvider transport;
   private final McpTokenAuth auth;
   private final Mode mode;
+  private final McpSseServerTransportProvider transport;
 
-  public McpTransportController(@NotNull WebControllerManager webControllerManager,
-                                @NotNull McpTokenAuth auth,
-                                @NotNull McpSseServerTransportProvider transport,
-                                @NotNull String path,
-                                @NotNull Mode mode) {
-    this.transport = transport;
+  public McpController(McpTokenAuth auth, Mode mode, McpSseServerTransportProvider transport) {
     this.auth = auth;
     this.mode = mode;
-    webControllerManager.registerController(path, this);
+    this.transport = transport;
   }
 
   @Override
@@ -36,7 +31,7 @@ public class McpTransportController extends BaseController {
       return null;
     }
 
-    if (mode == Mode.SSE) {
+    if (mode == McpSSETransportController.Mode.SSE) {
       if (!"GET".equalsIgnoreCase(request.getMethod())) {
         response.setStatus(405);
         return null;
@@ -52,4 +47,5 @@ public class McpTransportController extends BaseController {
     transport.handleMessage(request, response);
     return null;
   }
+
 }

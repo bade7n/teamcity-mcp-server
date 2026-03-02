@@ -68,8 +68,7 @@
           </execution>
         </executions>
         <configuration>
-          <server>
-          </server>
+          <server/>
         </configuration>
       </plugin>
     </plugins>

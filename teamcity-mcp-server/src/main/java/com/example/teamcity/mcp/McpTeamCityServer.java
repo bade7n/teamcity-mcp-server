@@ -1,5 +1,7 @@
 package com.example.teamcity.mcp;
 
+import com.example.teamcity.mcp.controller.McpMessageController;
+import com.example.teamcity.mcp.controller.McpSSETransportController;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapperSupplier;
 import io.modelcontextprotocol.server.McpServer;
@@ -20,21 +22,17 @@ import java.util.List;
 import java.util.Map;
 
 public class McpTeamCityServer implements DisposableBean {
-  private static final String MESSAGE_ENDPOINT = "/mcp/message/**";
-  private static final String SSE_ENDPOINT = "/mcp/sse/**";
 
   private final McpSseServerTransportProvider transport;
   private final McpSyncServer server;
 
-  public McpTeamCityServer(@NotNull SBuildServer buildServer,
-                           @NotNull WebControllerManager webControllerManager,
-                           @NotNull McpTokenAuth auth) {
+  public McpTeamCityServer(@NotNull SBuildServer buildServer) {
     String baseUrl = buildServer.getRootUrl();
 
     this.transport = McpSseServerTransportProvider.builder()
       .baseUrl(baseUrl == null ? "" : baseUrl)
-      .messageEndpoint(MESSAGE_ENDPOINT)
-      .sseEndpoint(SSE_ENDPOINT)
+      .messageEndpoint(McpMessageController.ENDPOINT)
+      .sseEndpoint(McpSSETransportController.ENDPOINT)
       .build();
 
     McpJsonMapper jsonMapper = resolveDefaultMapper();
@@ -48,9 +46,6 @@ public class McpTeamCityServer implements DisposableBean {
       .toolCall(buildStatusTool(), (exchange, request) -> buildStatus(buildServer, request))
       .toolCall(buildLogTool(), (exchange, request) -> buildLog(buildServer, request))
       .build();
-
-    new McpTransportController(webControllerManager, auth, transport, SSE_ENDPOINT, McpTransportController.Mode.SSE);
-    new McpTransportController(webControllerManager, auth, transport, MESSAGE_ENDPOINT, McpTransportController.Mode.MESSAGE);
   }
 
   @Override
