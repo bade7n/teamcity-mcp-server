@@ -42,8 +42,6 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
 
   private final McpJsonMapper jsonMapper;
   private final String baseUrl;
-  private final String messageEndpoint;
-  private final String sseEndpoint;
   private final Map<String, McpServerSession> sessions = new ConcurrentHashMap<>();
   private final AtomicBoolean isClosing = new AtomicBoolean(false);
 
@@ -53,26 +51,16 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
 
   private McpSseServerTransportProvider(McpJsonMapper jsonMapper,
                                         String baseUrl,
-                                        String messageEndpoint,
-                                        String sseEndpoint,
                                         Duration keepAliveInterval,
                                         McpTransportContextExtractor<HttpServletRequest> contextExtractor) {
     if (jsonMapper == null) {
       throw new IllegalArgumentException("JsonMapper must not be null");
-    }
-    if (messageEndpoint == null) {
-      throw new IllegalArgumentException("messageEndpoint must not be null");
-    }
-    if (sseEndpoint == null) {
-      throw new IllegalArgumentException("sseEndpoint must not be null");
     }
     if (contextExtractor == null) {
       throw new IllegalArgumentException("Context extractor must not be null");
     }
     this.jsonMapper = jsonMapper;
     this.baseUrl = baseUrl;
-    this.messageEndpoint = messageEndpoint;
-    this.sseEndpoint = sseEndpoint;
     this.contextExtractor = contextExtractor;
 
     if (keepAliveInterval != null) {
@@ -113,10 +101,6 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
 
   public void handleSse(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String uri = request.getRequestURI();
-    if (!uri.endsWith(sseEndpoint)) {
-      response.sendError(404);
-      return;
-    }
     if (isClosing.get()) {
       response.sendError(503, "Server is shutting down");
       return;
@@ -137,18 +121,12 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     McpServerSession session = sessionFactory.create(transport);
     sessions.put(sessionId, session);
 
-    sendEvent(writer, ENDPOINT_EVENT_TYPE, buildEndpointUrl(sessionId));
+    sendEvent(writer, ENDPOINT_EVENT_TYPE, buildEndpointUrl(request.getContextPath(), sessionId));
   }
 
   public void handleMessage(HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (isClosing.get()) {
       response.sendError(503, "Server is shutting down");
-      return;
-    }
-
-    String uri = request.getRequestURI();
-    if (!uri.endsWith(messageEndpoint)) {
-      response.sendError(404);
       return;
     }
 
@@ -224,12 +202,12 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     }
   }
 
-  private String buildEndpointUrl(String sessionId) {
+  private String buildEndpointUrl(String endpoint, String sessionId) {
     String resolvedBase = baseUrl == null ? "" : baseUrl;
     if (resolvedBase.endsWith("/")) {
-      return resolvedBase.substring(0, resolvedBase.length() - 1) + messageEndpoint + "?" + SESSION_ID + "=" + sessionId;
+      return resolvedBase.substring(0, resolvedBase.length() - 1) + endpoint + "?" + SESSION_ID + "=" + sessionId;
     }
-    return resolvedBase + messageEndpoint + "?" + SESSION_ID + "=" + sessionId;
+    return resolvedBase + endpoint + "?" + SESSION_ID + "=" + sessionId;
   }
 
   private void writeError(HttpServletResponse response, int status, McpError error) throws IOException {
@@ -293,8 +271,6 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
   public static final class Builder {
     private McpJsonMapper jsonMapper;
     private String baseUrl = DEFAULT_BASE_URL;
-    private String messageEndpoint = "/mcp/message";
-    private String sseEndpoint = DEFAULT_SSE_ENDPOINT;
     private Duration keepAliveInterval;
     private McpTransportContextExtractor<HttpServletRequest> contextExtractor = request -> McpTransportContext.EMPTY;
 
@@ -312,15 +288,6 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
       return this;
     }
 
-    public Builder messageEndpoint(String messageEndpoint) {
-      this.messageEndpoint = messageEndpoint;
-      return this;
-    }
-
-    public Builder sseEndpoint(String sseEndpoint) {
-      this.sseEndpoint = sseEndpoint;
-      return this;
-    }
 
     public Builder keepAliveInterval(Duration keepAliveInterval) {
       this.keepAliveInterval = keepAliveInterval;
@@ -333,7 +300,7 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     }
 
     public McpSseServerTransportProvider build() {
-      return new McpSseServerTransportProvider(jsonMapper, baseUrl, messageEndpoint, sseEndpoint, keepAliveInterval, contextExtractor);
+      return new McpSseServerTransportProvider(jsonMapper, baseUrl, keepAliveInterval, contextExtractor);
     }
 
     private static McpJsonMapper resolveDefaultMapper() {

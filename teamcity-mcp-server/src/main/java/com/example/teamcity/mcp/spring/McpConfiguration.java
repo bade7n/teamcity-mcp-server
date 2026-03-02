@@ -33,8 +33,6 @@ public class McpConfiguration {
     String baseUrl = buildServer.getRootUrl();
     return McpSseServerTransportProvider.builder()
                                  .baseUrl(baseUrl == null ? "" : baseUrl)
-                                 .messageEndpoint(McpMessageController.ENDPOINT)
-                                 .sseEndpoint(McpSSETransportController.ENDPOINT)
                                  .build();
   }
 }
