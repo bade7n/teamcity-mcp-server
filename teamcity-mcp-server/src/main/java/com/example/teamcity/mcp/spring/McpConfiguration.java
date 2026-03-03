@@ -3,8 +3,6 @@ package com.example.teamcity.mcp.spring;
 import com.example.teamcity.mcp.McpSseServerTransportProvider;
 import com.example.teamcity.mcp.McpTeamCityServer;
 import com.example.teamcity.mcp.McpTokenAuth;
-import com.example.teamcity.mcp.controller.McpMessageController;
-import com.example.teamcity.mcp.controller.McpSSETransportController;
 import jetbrains.buildServer.serverSide.SBuildServer;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
