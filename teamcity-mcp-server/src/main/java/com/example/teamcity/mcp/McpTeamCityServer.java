@@ -11,6 +11,7 @@ import jetbrains.buildServer.serverSide.SBuild;
 import jetbrains.buildServer.serverSide.SBuildServer;
 import jetbrains.buildServer.serverSide.SBuildType;
 import jetbrains.buildServer.serverSide.SQueuedBuild;
+import jetbrains.buildServer.serverSide.BuildPromotion;
 import jetbrains.buildServer.serverSide.buildLog.LogMessage;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.DisposableBean;
@@ -315,7 +316,41 @@ public class McpTeamCityServer implements DisposableBean {
     try {
       while (!Thread.currentThread().isInterrupted()) {
         SBuild build = buildServer.findBuildInstanceById(buildId);
+        boolean queueOrPromotionExists = false;
+        Long resolvedBuildId = null;
+
         if (build == null) {
+          SQueuedBuild queuedByItem = buildServer.getQueue().findQueued(String.valueOf(buildId));
+          if (queuedByItem != null) {
+            queueOrPromotionExists = true;
+            BuildPromotion promotion = queuedByItem.getBuildPromotion();
+            if (promotion != null) {
+              resolvedBuildId = promotion.getAssociatedBuildId();
+            }
+          }
+
+          if (!queueOrPromotionExists) {
+            for (SQueuedBuild queued : buildServer.getQueue().getItems()) {
+              BuildPromotion promotion = queued.getBuildPromotion();
+              if (promotion == null) continue;
+              if (promotion.getId() == buildId) {
+                queueOrPromotionExists = true;
+                resolvedBuildId = promotion.getAssociatedBuildId();
+                break;
+              }
+            }
+          }
+
+          if (resolvedBuildId != null) {
+            build = buildServer.findBuildInstanceById(resolvedBuildId);
+          }
+        }
+
+        if (build == null) {
+          if (queueOrPromotionExists) {
+            TimeUnit.MILLISECONDS.sleep(pollIntervalMs);
+            continue;
+          }
           notifyLogEvent(METHOD_BUILD_LOG_ERROR, Map.of(
             "buildId", buildId,
             "message", "build_not_found"
