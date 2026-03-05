@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Iterator;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
@@ -37,12 +38,15 @@ public class McpTeamCityServer implements DisposableBean {
   private static final String METHOD_BUILD_LOG_CHUNK = "teamcity/buildLogChunk";
   private static final String METHOD_BUILD_LOG_FINISHED = "teamcity/buildLogFinished";
   private static final String METHOD_BUILD_LOG_ERROR = "teamcity/buildLogError";
+  private static final String METHOD_BUILD_STATUS_UPDATE = "teamcity/buildStatusUpdate";
+  private static final String METHOD_BUILD_STATUS_ERROR = "teamcity/buildStatusError";
 
   private final McpSseServerTransportProvider transport;
   private final McpSyncServer server;
   private final SBuildServer buildServer;
   private final ExecutorService logStreamExecutor = Executors.newCachedThreadPool();
   private final ConcurrentMap<Long, Future<?>> activeLogStreams = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, Future<?>> activeBuildStatusStreams = new ConcurrentHashMap<>();
 
   public McpTeamCityServer(@NotNull SBuildServer buildServer, McpSseServerTransportProvider transport) {
     this.buildServer = buildServer;
@@ -56,6 +60,7 @@ public class McpTeamCityServer implements DisposableBean {
       .jsonMapper(jsonMapper)
       .jsonSchemaValidator(schemaValidator)
       .toolCall(startBuildTool(), (exchange, request) -> startBuild(buildServer, request))
+      .toolCall(startBuildAndStreamTool(), (exchange, request) -> startBuildAndStream(request))
       .toolCall(startBuildByNameTool(), (exchange, request) -> startBuildByName(buildServer, request))
       .toolCall(buildStatusTool(), (exchange, request) -> buildStatus(buildServer, request))
       .toolCall(buildLogTool(), (exchange, request) -> buildLog(buildServer, request))
@@ -69,6 +74,10 @@ public class McpTeamCityServer implements DisposableBean {
       streamTask.cancel(true);
     }
     activeLogStreams.clear();
+    for (Future<?> streamTask : activeBuildStatusStreams.values()) {
+      streamTask.cancel(true);
+    }
+    activeBuildStatusStreams.clear();
     logStreamExecutor.shutdownNow();
     server.closeGracefully();
     transport.closeGracefully().block();
@@ -80,6 +89,20 @@ public class McpTeamCityServer implements DisposableBean {
       .description("Start a TeamCity build by buildTypeId.")
       .inputSchema(objectSchema(
         Map.of("buildTypeId", stringSchema()),
+        List.of("buildTypeId")
+      ))
+      .build();
+  }
+
+  private static McpSchema.Tool startBuildAndStreamTool() {
+    return McpSchema.Tool.builder()
+      .name("start_build_and_stream")
+      .description("Start a TeamCity build and stream status updates to SSE notifications.")
+      .inputSchema(objectSchema(
+        Map.of(
+          "buildTypeId", stringSchema(),
+          "pollIntervalMs", stringSchema()
+        ),
         List.of("buildTypeId")
       ))
       .build();
@@ -220,6 +243,42 @@ public class McpTeamCityServer implements DisposableBean {
     }
 
     return successResult(payload, "queued");
+  }
+
+  private McpSchema.CallToolResult startBuildAndStream(McpSchema.CallToolRequest request) {
+    Map<String, Object> args = safeArgs(request.arguments());
+    String buildTypeId = asString(args.get("buildTypeId"));
+    if (buildTypeId == null || buildTypeId.isBlank()) {
+      return errorResult("buildTypeId is required");
+    }
+
+    SBuildType buildType = buildServer.getProjectManager().findBuildTypeById(buildTypeId);
+    if (buildType == null) {
+      return errorResult("buildType_not_found");
+    }
+
+    int pollIntervalMs = parsePollInterval(asString(args.get("pollIntervalMs")));
+    SQueuedBuild queued = buildType.addToQueue("MCP request");
+    Long promotionId = extractBuildId(queued);
+    String queueItemId = extractQueueItemId(queued);
+    String streamId = buildStreamId(buildTypeId, queueItemId, promotionId);
+
+    Future<?> started = logStreamExecutor.submit(
+      () -> streamBuildStatusLoop(streamId, buildTypeId, queueItemId, promotionId, pollIntervalMs)
+    );
+    activeBuildStatusStreams.put(streamId, started);
+
+    Map<String, Object> payload = new HashMap<>();
+    payload.put("state", "queued");
+    payload.put("buildTypeId", buildTypeId);
+    payload.put("streaming", true);
+    payload.put("streamId", streamId);
+    payload.put("pollIntervalMs", pollIntervalMs);
+    payload.put("queueItemId", queueItemId);
+    if (promotionId != null) {
+      payload.put("buildId", promotionId);
+    }
+    return successResult(payload, "stream_started");
   }
 
   private static McpSchema.CallToolResult buildStatus(SBuildServer buildServer, McpSchema.CallToolRequest request) {
@@ -411,6 +470,141 @@ public class McpTeamCityServer implements DisposableBean {
     } catch (Exception ignored) {
       // Drop notification errors to keep log streamer resilient.
     }
+  }
+
+  private void streamBuildStatusLoop(@NotNull String streamId,
+                                     @NotNull String buildTypeId,
+                                     String queueItemId,
+                                     Long initialPromotionId,
+                                     int pollIntervalMs) {
+    String lastState = null;
+    String lastStatus = null;
+    Long lastBuildId = null;
+    String mutableQueueItemId = queueItemId;
+    Long promotionId = initialPromotionId;
+    try {
+      while (!Thread.currentThread().isInterrupted()) {
+        SQueuedBuild queued = null;
+        if (mutableQueueItemId != null) {
+          queued = buildServer.getQueue().findQueued(mutableQueueItemId);
+        }
+
+        if (queued == null && promotionId != null) {
+          for (SQueuedBuild item : buildServer.getQueue().getItems()) {
+            if (item == null) continue;
+            BuildPromotion itemPromotion = item.getBuildPromotion();
+            if (itemPromotion == null) continue;
+            if (itemPromotion.getId() == promotionId.longValue()) {
+              queued = item;
+              mutableQueueItemId = extractQueueItemId(item);
+              break;
+            }
+          }
+        }
+
+        if (queued != null && promotionId == null) {
+          BuildPromotion queuedPromotion = queued.getBuildPromotion();
+          if (queuedPromotion != null) {
+            promotionId = queuedPromotion.getId();
+          }
+        }
+
+        Long associatedBuildId = null;
+        if (queued != null) {
+          BuildPromotion queuedPromotion = queued.getBuildPromotion();
+          if (queuedPromotion != null) {
+            associatedBuildId = queuedPromotion.getAssociatedBuildId();
+          }
+        }
+
+        if (associatedBuildId == null && lastBuildId != null) {
+          associatedBuildId = lastBuildId;
+        }
+
+        SBuild build = associatedBuildId == null ? null : buildServer.findBuildInstanceById(associatedBuildId);
+        if (build != null) {
+          lastBuildId = associatedBuildId;
+        }
+
+        String state;
+        String status;
+        if (build != null) {
+          state = build.isFinished() ? "finished" : "running";
+          status = build.getBuildStatus() == null ? "unknown" : build.getBuildStatus().toString().toLowerCase(Locale.ROOT);
+        } else if (queued != null) {
+          state = "queued";
+          status = "unknown";
+        } else {
+          notifyBuildStatusEvent(METHOD_BUILD_STATUS_ERROR, buildStatusPayload(
+            streamId, buildTypeId, mutableQueueItemId, lastBuildId, null, null, "build_not_found"
+          ));
+          return;
+        }
+
+        if (!Objects.equals(lastState, state) || !Objects.equals(lastStatus, status) || !Objects.equals(lastBuildId, associatedBuildId)) {
+          notifyBuildStatusEvent(METHOD_BUILD_STATUS_UPDATE, buildStatusPayload(
+            streamId, buildTypeId, mutableQueueItemId, associatedBuildId, state, status, null
+          ));
+          lastState = state;
+          lastStatus = status;
+        }
+
+        if ("finished".equals(state)) {
+          return;
+        }
+
+        TimeUnit.MILLISECONDS.sleep(pollIntervalMs);
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+    } catch (Exception ex) {
+      notifyBuildStatusEvent(METHOD_BUILD_STATUS_ERROR, buildStatusPayload(
+        streamId, buildTypeId, mutableQueueItemId, lastBuildId, null, null, safeString(ex.getMessage())
+      ));
+    } finally {
+      activeBuildStatusStreams.remove(streamId);
+    }
+  }
+
+  private void notifyBuildStatusEvent(@NotNull String method, @NotNull Object payload) {
+    try {
+      transport.notifyClients(method, payload).block();
+    } catch (Exception ignored) {
+      // Drop notification errors to keep status streamer resilient.
+    }
+  }
+
+  private static String buildStreamId(@NotNull String buildTypeId, String queueItemId, Long promotionId) {
+    String sourceId = queueItemId != null ? queueItemId : promotionId == null ? String.valueOf(System.nanoTime()) : String.valueOf(promotionId);
+    return buildTypeId + ":" + sourceId;
+  }
+
+  private static Map<String, Object> buildStatusPayload(@NotNull String streamId,
+                                                        @NotNull String buildTypeId,
+                                                        String queueItemId,
+                                                        Long buildId,
+                                                        String state,
+                                                        String status,
+                                                        String message) {
+    Map<String, Object> payload = new HashMap<>();
+    payload.put("streamId", streamId);
+    payload.put("buildTypeId", buildTypeId);
+    if (queueItemId != null) {
+      payload.put("queueItemId", queueItemId);
+    }
+    if (buildId != null) {
+      payload.put("buildId", buildId);
+    }
+    if (state != null) {
+      payload.put("state", state);
+    }
+    if (status != null) {
+      payload.put("status", status);
+    }
+    if (message != null) {
+      payload.put("message", message);
+    }
+    return payload;
   }
 
   private static McpJsonMapper resolveDefaultMapper() {

@@ -10,6 +10,7 @@ import io.modelcontextprotocol.spec.McpServerTransport;
 import io.modelcontextprotocol.spec.McpServerTransportProvider;
 import io.modelcontextprotocol.util.KeepAliveScheduler;
 import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapperSupplier;
+import com.example.teamcity.mcp.controller.McpMessageController;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
@@ -39,10 +40,12 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
   public static final String ENDPOINT_EVENT_TYPE = "endpoint";
   public static final String SESSION_ID = "sessionId";
   public static final String DEFAULT_BASE_URL = "http://localhost:8080";
+  public static final String APP_PREFIX = "/app";
 
   private final McpJsonMapper jsonMapper;
   private final String baseUrl;
   private final Map<String, McpServerSession> sessions = new ConcurrentHashMap<>();
+  private final Map<String, SseSessionTransport> sessionTransports = new ConcurrentHashMap<>();
   private final AtomicBoolean isClosing = new AtomicBoolean(false);
 
   private McpTransportContextExtractor<HttpServletRequest> contextExtractor;
@@ -100,10 +103,17 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
   }
 
   public void handleSse(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    String uri = request.getRequestURI();
     if (isClosing.get()) {
       response.sendError(503, "Server is shutting down");
       return;
+    }
+
+    String requestedSessionId = request.getParameter(SESSION_ID);
+    if (requestedSessionId != null && !requestedSessionId.isBlank()) {
+      if (!sessions.containsKey(requestedSessionId) || !sessionTransports.containsKey(requestedSessionId)) {
+        response.sendError(404, "Session not found: " + requestedSessionId);
+        return;
+      }
     }
 
     response.setContentType("text/event-stream");
@@ -112,16 +122,30 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     response.setHeader("Connection", "keep-alive");
     response.setHeader("Access-Control-Allow-Origin", "*");
 
-    String sessionId = UUID.randomUUID().toString();
     AsyncContext asyncContext = request.startAsync();
     asyncContext.setTimeout(0);
 
     PrintWriter writer = response.getWriter();
-    SseSessionTransport transport = new SseSessionTransport(sessionId, asyncContext, writer);
-    McpServerSession session = sessionFactory.create(transport);
-    sessions.put(sessionId, session);
+    String sessionId;
+    if (requestedSessionId != null && !requestedSessionId.isBlank()) {
+      sessionId = requestedSessionId;
+      SseSessionTransport existingTransport = sessionTransports.get(sessionId);
+      if (existingTransport == null) {
+        response.sendError(404, "Session not found: " + sessionId);
+        return;
+      }
+      existingTransport.attachConnection(asyncContext, writer);
+      logger.debug("SSE connection restored for session {}", sessionId);
+    } else {
+      sessionId = UUID.randomUUID().toString();
+      SseSessionTransport transport = new SseSessionTransport(sessionId);
+      transport.attachConnection(asyncContext, writer);
+      McpServerSession session = sessionFactory.create(transport);
+      sessions.put(sessionId, session);
+      sessionTransports.put(sessionId, transport);
+    }
 
-    sendEvent(writer, ENDPOINT_EVENT_TYPE, buildEndpointUrl(request.getContextPath(), sessionId));
+    sendEvent(writer, ENDPOINT_EVENT_TYPE, buildMessageEndpointUrl(request, sessionId));
   }
 
   public void handleMessage(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -159,9 +183,12 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
       McpSchema.JSONRPCMessage message = McpSchema.deserializeJsonRpcMessage(jsonMapper, payload.toString());
       session.handle(message)
         .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, finalContext))
-        .block();
+        .subscribe(
+          unused -> { },
+          ex -> logger.error("Error while handling MCP message for session {}: {}", sessionId, ex.toString())
+        );
 
-      response.setStatus(200);
+      response.setStatus(202);
     } catch (Exception ex) {
       logger.error("Error processing message: {}", ex.getMessage());
       try {
@@ -182,6 +209,7 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
       .then()
       .doOnSuccess(ignored -> {
         sessions.clear();
+        sessionTransports.clear();
         logger.debug("Graceful shutdown completed");
         if (keepAliveScheduler != null) {
           keepAliveScheduler.shutdown();
@@ -210,6 +238,12 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     return resolvedBase + endpoint + "?" + SESSION_ID + "=" + sessionId;
   }
 
+  private String buildMessageEndpointUrl(HttpServletRequest request, String sessionId) {
+    String contextPath = request.getContextPath();
+    String resolvedContextPath = contextPath == null ? "" : contextPath;
+    return buildEndpointUrl(resolvedContextPath + APP_PREFIX + McpMessageController.ENDPOINT, sessionId);
+  }
+
   private void writeError(HttpServletResponse response, int status, McpError error) throws IOException {
     response.setContentType(APPLICATION_JSON);
     response.setCharacterEncoding(UTF_8);
@@ -222,27 +256,47 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
 
   private final class SseSessionTransport implements McpServerTransport {
     private final String sessionId;
-    private final AsyncContext asyncContext;
-    private final PrintWriter writer;
+    private final Object connectionLock = new Object();
+    private volatile SseConnection connection;
 
-    private SseSessionTransport(String sessionId, AsyncContext asyncContext, PrintWriter writer) {
+    private SseSessionTransport(String sessionId) {
       this.sessionId = sessionId;
-      this.asyncContext = asyncContext;
-      this.writer = writer;
       logger.debug("Session transport {} initialized with SSE writer", sessionId);
+    }
+
+    private void attachConnection(AsyncContext asyncContext, PrintWriter writer) {
+      SseConnection oldConnection;
+      synchronized (connectionLock) {
+        oldConnection = connection;
+        connection = new SseConnection(asyncContext, writer);
+      }
+      completeConnection(oldConnection);
+    }
+
+    private void detachConnection() {
+      SseConnection oldConnection;
+      synchronized (connectionLock) {
+        oldConnection = connection;
+        connection = null;
+      }
+      completeConnection(oldConnection);
     }
 
     @Override
     public Mono<Void> sendMessage(McpSchema.JSONRPCMessage message) {
       return Mono.fromRunnable(() -> {
+        SseConnection activeConnection = connection;
+        if (activeConnection == null) {
+          logger.debug("No active SSE connection for session {}", sessionId);
+          return;
+        }
         try {
           String json = jsonMapper.writeValueAsString(message);
-          sendEvent(writer, MESSAGE_EVENT_TYPE, json);
+          sendEvent(activeConnection.writer, MESSAGE_EVENT_TYPE, json);
           logger.debug("Message sent to session {}", sessionId);
         } catch (Exception ex) {
           logger.error("Failed to send message to session {}: {}", sessionId, ex.getMessage());
-          sessions.remove(sessionId);
-          asyncContext.complete();
+          detachConnection();
         }
       });
     }
@@ -260,11 +314,29 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     @Override
     public void close() {
       sessions.remove(sessionId);
+      sessionTransports.remove(sessionId);
+      detachConnection();
+    }
+
+    private void completeConnection(SseConnection connection) {
+      if (connection == null) {
+        return;
+      }
       try {
-        asyncContext.complete();
+        connection.asyncContext.complete();
       } catch (Exception ex) {
         logger.warn("Failed to complete async context for session {}: {}", sessionId, ex.getMessage());
       }
+    }
+  }
+
+  private static final class SseConnection {
+    private final AsyncContext asyncContext;
+    private final PrintWriter writer;
+
+    private SseConnection(AsyncContext asyncContext, PrintWriter writer) {
+      this.asyncContext = asyncContext;
+      this.writer = writer;
     }
   }
 

@@ -122,6 +122,42 @@ class McpTeamCityServerTest {
     assertEquals("id is required", firstMessage(result));
   }
 
+  @Test
+  void startBuildAndStreamMissingBuildTypeIdReturnsError() throws Exception {
+    SBuildServer buildServer = mock(SBuildServer.class);
+    McpSseServerTransportProvider transport = McpSseServerTransportProvider.builder().build();
+    McpTeamCityServer server = new McpTeamCityServer(buildServer, transport);
+    try {
+      McpSchema.CallToolResult result = invokeInstance(server, "startBuildAndStream", Map.of());
+      assertTrue(Boolean.TRUE.equals(result.isError()));
+      assertEquals("buildTypeId is required", firstMessage(result));
+    } finally {
+      server.destroy();
+    }
+  }
+
+  @Test
+  void startBuildAndStreamUnknownBuildTypeReturnsError() throws Exception {
+    SBuildServer buildServer = mock(SBuildServer.class);
+    ProjectManager projectManager = mock(ProjectManager.class);
+    when(buildServer.getProjectManager()).thenReturn(projectManager);
+    when(projectManager.findBuildTypeById("bt404")).thenReturn(null);
+
+    McpSseServerTransportProvider transport = McpSseServerTransportProvider.builder().build();
+    McpTeamCityServer server = new McpTeamCityServer(buildServer, transport);
+    try {
+      McpSchema.CallToolResult result = invokeInstance(
+        server,
+        "startBuildAndStream",
+        Map.of("buildTypeId", "bt404")
+      );
+      assertTrue(Boolean.TRUE.equals(result.isError()));
+      assertEquals("buildType_not_found", firstMessage(result));
+    } finally {
+      server.destroy();
+    }
+  }
+
   private static McpSchema.CallToolResult invoke(String methodName,
                                                  SBuildServer buildServer,
                                                  Map<String, Object> args) throws Exception {
@@ -129,6 +165,15 @@ class McpTeamCityServerTest {
     method.setAccessible(true);
     McpSchema.CallToolRequest request = new McpSchema.CallToolRequest("tool", args);
     return (McpSchema.CallToolResult) method.invoke(null, buildServer, request);
+  }
+
+  private static McpSchema.CallToolResult invokeInstance(McpTeamCityServer server,
+                                                         String methodName,
+                                                         Map<String, Object> args) throws Exception {
+    Method method = McpTeamCityServer.class.getDeclaredMethod(methodName, McpSchema.CallToolRequest.class);
+    method.setAccessible(true);
+    McpSchema.CallToolRequest request = new McpSchema.CallToolRequest("tool", args);
+    return (McpSchema.CallToolResult) method.invoke(server, request);
   }
 
   private static String firstMessage(McpSchema.CallToolResult result) {
