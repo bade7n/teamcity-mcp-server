@@ -131,6 +131,48 @@ class McpPluginClientTest {
   }
 
   @Test
+  void eventsAreBufferedWhileSseIsDisconnectedAndDeliveredAfterReconnect() throws Exception {
+    McpSseServerTransportProvider transport = McpSseServerTransportProvider.builder().baseUrl("http://localhost:8111").build();
+    try {
+      SBuildServer buildServer = mock(SBuildServer.class);
+      McpTeamCityServer mcpServer = new McpTeamCityServer(buildServer, transport);
+      McpSSETransportController sseController = new McpSSETransportController(transport);
+      McpMessageController messageController = new McpMessageController(transport);
+      TestMcpClient client = new TestMcpClient();
+
+      SessionHandle openedSession = client.openSession(sseController);
+      int initializeStatus = client.sendJsonRpc(
+        messageController,
+        openedSession.sessionId,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}"
+      );
+      int initializedNotificationStatus = client.sendJsonRpc(
+        messageController,
+        openedSession.sessionId,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
+      );
+      assertEquals(202, initializeStatus);
+      assertEquals(202, initializedNotificationStatus);
+
+      transport.disconnectSseStreamForSession(openedSession.sessionId);
+      int toolsListStatus = client.sendJsonRpc(
+        messageController,
+        openedSession.sessionId,
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}"
+      );
+      assertEquals(202, toolsListStatus);
+
+      SessionHandle restoredSession = client.reconnectSession(sseController, openedSession.sessionId);
+      assertTrue(waitForContains(restoredSession.sseBody, "\"id\":2", 5000), "buffered tools/list response must be delivered after reconnect");
+      assertTrue(waitForContains(restoredSession.sseBody, "\"start_build\"", 5000), "buffered tools/list payload must be delivered after reconnect");
+
+      mcpServer.destroy();
+    } finally {
+      transport.destroy();
+    }
+  }
+
+  @Test
   void clientGetsNotFoundForUnknownSession() throws Exception {
     McpSseServerTransportProvider transport = McpSseServerTransportProvider.builder().build();
     McpMessageController messageController = new McpMessageController(transport);

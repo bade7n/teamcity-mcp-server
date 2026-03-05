@@ -23,6 +23,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -41,6 +42,7 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
   public static final String SESSION_ID = "sessionId";
   public static final String DEFAULT_BASE_URL = "http://localhost:8080";
   public static final String APP_PREFIX = "/app";
+  private static final int DEFAULT_PENDING_EVENT_BUFFER_SIZE = 1024;
 
   private final McpJsonMapper jsonMapper;
   private final String baseUrl;
@@ -221,6 +223,16 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     closeGracefully().block();
   }
 
+  void disconnectSseStreamForSession(String sessionId) {
+    if (sessionId == null) {
+      return;
+    }
+    SseSessionTransport transport = sessionTransports.get(sessionId);
+    if (transport != null) {
+      transport.detachConnection();
+    }
+  }
+
   private void sendEvent(PrintWriter writer, String eventType, String data) throws IOException {
     writer.write("event: " + eventType + "\n");
     writer.write("data: " + data + "\n\n");
@@ -257,6 +269,8 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
   private final class SseSessionTransport implements McpServerTransport {
     private final String sessionId;
     private final Object connectionLock = new Object();
+    private final Object pendingEventsLock = new Object();
+    private final ArrayDeque<String> pendingMessageEvents = new ArrayDeque<>();
     private volatile SseConnection connection;
 
     private SseSessionTransport(String sessionId) {
@@ -271,6 +285,7 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
         connection = new SseConnection(asyncContext, writer);
       }
       completeConnection(oldConnection);
+      flushPendingEvents();
     }
 
     private void detachConnection() {
@@ -285,17 +300,26 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     @Override
     public Mono<Void> sendMessage(McpSchema.JSONRPCMessage message) {
       return Mono.fromRunnable(() -> {
+        String json;
+        try {
+          json = jsonMapper.writeValueAsString(message);
+        } catch (Exception ex) {
+          logger.error("Failed to serialize message for session {}: {}", sessionId, ex.getMessage());
+          return;
+        }
+
         SseConnection activeConnection = connection;
         if (activeConnection == null) {
+          bufferMessageEvent(json);
           logger.debug("No active SSE connection for session {}", sessionId);
           return;
         }
         try {
-          String json = jsonMapper.writeValueAsString(message);
           sendEvent(activeConnection.writer, MESSAGE_EVENT_TYPE, json);
           logger.debug("Message sent to session {}", sessionId);
         } catch (Exception ex) {
           logger.error("Failed to send message to session {}: {}", sessionId, ex.getMessage());
+          bufferMessageEvent(json);
           detachConnection();
         }
       });
@@ -326,6 +350,40 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
         connection.asyncContext.complete();
       } catch (Exception ex) {
         logger.warn("Failed to complete async context for session {}: {}", sessionId, ex.getMessage());
+      }
+    }
+
+    private void bufferMessageEvent(String jsonPayload) {
+      synchronized (pendingEventsLock) {
+        while (pendingMessageEvents.size() >= DEFAULT_PENDING_EVENT_BUFFER_SIZE) {
+          pendingMessageEvents.pollFirst();
+        }
+        pendingMessageEvents.offerLast(jsonPayload);
+      }
+    }
+
+    private void flushPendingEvents() {
+      while (true) {
+        SseConnection activeConnection = connection;
+        if (activeConnection == null) {
+          return;
+        }
+
+        String payload;
+        synchronized (pendingEventsLock) {
+          payload = pendingMessageEvents.pollFirst();
+        }
+        if (payload == null) {
+          return;
+        }
+
+        try {
+          sendEvent(activeConnection.writer, MESSAGE_EVENT_TYPE, payload);
+        } catch (Exception ex) {
+          bufferMessageEvent(payload);
+          detachConnection();
+          return;
+        }
       }
     }
   }
