@@ -104,17 +104,17 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
       .then();
   }
 
-  public void handleSse(HttpServletRequest request, HttpServletResponse response) throws IOException {
+  public String openSseSession(HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (isClosing.get()) {
       response.sendError(503, "Server is shutting down");
-      return;
+      return null;
     }
 
     String requestedSessionId = request.getParameter(SESSION_ID);
     if (requestedSessionId != null && !requestedSessionId.isBlank()) {
       if (!sessions.containsKey(requestedSessionId) || !sessionTransports.containsKey(requestedSessionId)) {
         response.sendError(404, "Session not found: " + requestedSessionId);
-        return;
+        return null;
       }
     }
 
@@ -134,7 +134,7 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
       SseSessionTransport existingTransport = sessionTransports.get(sessionId);
       if (existingTransport == null) {
         response.sendError(404, "Session not found: " + sessionId);
-        return;
+        return null;
       }
       existingTransport.attachConnection(asyncContext, writer);
       logger.debug("SSE connection restored for session {}", sessionId);
@@ -148,6 +148,18 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
     }
 
     sendEvent(writer, ENDPOINT_EVENT_TYPE, buildMessageEndpointUrl(request, sessionId));
+    return sessionId;
+  }
+
+  public void handleSse(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    openSseSession(request, response);
+  }
+
+  public void sendJsonRpcToSession(String sessionId, String payload) {
+    if (sessionId == null || sessionId.isBlank()) {
+      return;
+    }
+    processJsonRpcPayload(sessionId, payload, McpTransportContext.EMPTY);
   }
 
   public void handleMessage(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -180,16 +192,8 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
       if (context == null) {
         context = McpTransportContext.EMPTY;
       }
-      McpTransportContext finalContext = context;
 
-      McpSchema.JSONRPCMessage message = McpSchema.deserializeJsonRpcMessage(jsonMapper, payload.toString());
-      session.handle(message)
-        .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, finalContext))
-        .subscribe(
-          unused -> { },
-          ex -> logger.error("Error while handling MCP message for session {}: {}", sessionId, ex.toString())
-        );
-
+      processJsonRpcPayload(sessionId, payload.toString(), context);
       response.setStatus(202);
     } catch (Exception ex) {
       logger.error("Error processing message: {}", ex.getMessage());
@@ -199,6 +203,27 @@ public class McpSseServerTransportProvider implements McpServerTransportProvider
         logger.error(FAILED_TO_SEND_ERROR_RESPONSE, ioEx.getMessage());
         response.sendError(500, "Error processing message");
       }
+    }
+  }
+
+  private void processJsonRpcPayload(String sessionId, String payload, McpTransportContext context) {
+    McpServerSession session = sessions.get(sessionId);
+    if (session == null) {
+      logger.warn("Cannot process MCP message for missing session {}", sessionId);
+      return;
+    }
+    McpTransportContext resolvedContext = context == null ? McpTransportContext.EMPTY : context;
+
+    try {
+      McpSchema.JSONRPCMessage message = McpSchema.deserializeJsonRpcMessage(jsonMapper, payload);
+      session.handle(message)
+        .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, resolvedContext))
+        .subscribe(
+          unused -> { },
+          ex -> logger.error("Error while handling MCP message for session {}: {}", sessionId, ex.toString())
+        );
+    } catch (Exception ex) {
+      logger.error("Failed to parse/process MCP payload for session {}: {}", sessionId, ex.toString());
     }
   }
 

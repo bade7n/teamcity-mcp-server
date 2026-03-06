@@ -5,6 +5,7 @@ import com.example.teamcity.mcp.controller.McpSSETransportController;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.McpServerSession;
 import jetbrains.buildServer.serverSide.SBuildServer;
+import jetbrains.buildServer.serverSide.ProjectManager;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
@@ -27,6 +28,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doAnswer;
 
 class McpPluginClientTest {
   @Test
@@ -173,6 +175,31 @@ class McpPluginClientTest {
   }
 
   @Test
+  void startSseEndpointCanOpenSessionAndStartBuildInOneCall() throws Exception {
+    McpSseServerTransportProvider transport = McpSseServerTransportProvider.builder().baseUrl("http://localhost:8111").build();
+    try {
+      SBuildServer buildServer = mock(SBuildServer.class);
+      ProjectManager projectManager = mock(ProjectManager.class);
+      when(buildServer.getProjectManager()).thenReturn(projectManager);
+      when(projectManager.findBuildTypeById("bt404")).thenReturn(null);
+
+      McpTeamCityServer mcpServer = new McpTeamCityServer(buildServer, transport);
+      McpSSETransportController sseController = new McpSSETransportController(transport);
+      TestMcpClient client = new TestMcpClient();
+
+      SessionHandle session = client.openStartedSession(sseController, "bt404");
+
+      assertTrue(waitForContains(session.sseBody, "\"id\":1", 5000), "initialize response id must arrive to SSE stream");
+      assertTrue(waitForContains(session.sseBody, "\"id\":2", 5000), "start_build response id must arrive to SSE stream");
+      assertTrue(waitForContains(session.sseBody, "buildType_not_found", 5000), "start endpoint must trigger build start call");
+
+      mcpServer.destroy();
+    } finally {
+      transport.destroy();
+    }
+  }
+
+  @Test
   void clientGetsNotFoundForUnknownSession() throws Exception {
     McpSseServerTransportProvider transport = McpSseServerTransportProvider.builder().build();
     McpMessageController messageController = new McpMessageController(transport);
@@ -194,20 +221,42 @@ class McpPluginClientTest {
       return openSession(controller, sessionId);
     }
 
+    SessionHandle openStartedSession(McpSSETransportController controller, String buildTypeId) throws Exception {
+      return openSession(controller, null, "/mcp/sse/start", buildTypeId, null);
+    }
+
     private SessionHandle openSession(McpSSETransportController controller, String existingSessionId) throws Exception {
+      return openSession(controller, existingSessionId, "/mcp/sse", null, null);
+    }
+
+    private SessionHandle openSession(McpSSETransportController controller,
+                                      String existingSessionId,
+                                      String requestUri,
+                                      String buildTypeId,
+                                      String buildConfigName) throws Exception {
       HttpServletRequest request = mock(HttpServletRequest.class);
       HttpServletResponse response = mock(HttpServletResponse.class);
       AsyncContext asyncContext = mock(AsyncContext.class);
       StringWriter body = new StringWriter();
 
       when(request.getMethod()).thenReturn("GET");
-      when(request.getRequestURI()).thenReturn("/mcp/sse");
+      when(request.getRequestURI()).thenReturn(requestUri);
       when(request.getContextPath()).thenReturn("/bs");
-      when(request.getParameter(McpSseServerTransportProvider.SESSION_ID)).thenReturn(existingSessionId);
+      doAnswer(invocation -> {
+        String key = invocation.getArgument(0);
+        if (McpSseServerTransportProvider.SESSION_ID.equals(key)) return existingSessionId;
+        if ("buildTypeId".equals(key)) return buildTypeId;
+        if ("buildConfigName".equals(key)) return buildConfigName;
+        return null;
+      }).when(request).getParameter(any(String.class));
       when(request.startAsync()).thenReturn(asyncContext);
       when(response.getWriter()).thenReturn(new PrintWriter(body, true));
 
-      controller.handle(request, response);
+      if ("/mcp/sse/start".equals(requestUri)) {
+        controller.handleStart(request, response);
+      } else {
+        controller.handle(request, response);
+      }
 
       Matcher matcher = SESSION_ID_PATTERN.matcher(body.toString());
       assertTrue(matcher.find(), "SSE response must contain sessionId");
